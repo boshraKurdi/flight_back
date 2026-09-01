@@ -1,0 +1,79 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      UserRole @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Airline {
+  id        Int      @id @default(autoincrement())
+  name      String
+  code      String   @unique
+  logo      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  flights   Flight[]
+}
+
+model Airport {
+  id        Int      @id @default(autoincrement())
+  name      String
+  city      String
+  country   String
+  code      String   @unique
+  timezone  String?
+
+  departureFlights Flight[] @relation("DepartureAirport")
+  arrivalFlights   Flight[] @relation("ArrivalAirport")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Flight {
+  id Int @id @default(autoincrement())
+
+  flightNumber String
+
+  airlineId Int
+  airline   Airline @relation(fields: [airlineId], references: [id])
+departureAirportId Int
+departureAirport   Airport @relation("DepartureAirport", fields: [departureAirportId], references: [id])
+
+arrivalAirportId Int
+arrivalAirport   Airport @relation("ArrivalAirport", fields: [arrivalAirportId], references: [id])
+
+  departureTime DateTime
+  arrivalTime   DateTime
+
+  price         Decimal @db.Decimal(10, 2)
+  currency      String  @default("USD")
+
+  totalSeats     Int
+  availableSeats Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([departureAirportId, arrivalAirportId])
+  @@index([departureTime])
+  @@index([airlineId])
+}
