@@ -3,6 +3,8 @@ import cors from "cors";
 
 import authRoutes from "./routes/auth.routes";
 import flightRoutes from "./routes/flight.routes";
+import bookingRoutes from "./routes/booking.routes";
+import adminBookingRoutes from "./routes/adminBooking.routes";
 
 const app = express();
 
@@ -18,6 +20,8 @@ app.use(express.json());
 
 app.use("/api/auth", authRoutes);
 app.use("/api/flights", flightRoutes);
+app.use("/api/bookings", bookingRoutes);
+app.use("/api/admin/bookings", adminBookingRoutes);
 
 app.get("/", (req, res) => {
   res.json({
