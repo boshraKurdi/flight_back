@@ -81,8 +81,10 @@ export const getFlights = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error("Get flights error:", error);
 
+    const message = error instanceof Error ? error.message : String(error);
+
     return res.status(500).json({
-      message: "Failed to fetch flights",
+      message,
     });
   }
 };
