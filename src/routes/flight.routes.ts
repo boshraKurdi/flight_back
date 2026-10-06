@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import {
   getFlights,
+  getAirports,
   searchFlights,
   getFlightById,
   createFlight,
@@ -17,6 +18,7 @@ import {
 const router = Router();
 
 // Public flight APIs
+router.get("/airports", getAirports);
 router.get("/", getFlights);
 router.get("/search", searchFlights);
 router.get("/:id", getFlightById);

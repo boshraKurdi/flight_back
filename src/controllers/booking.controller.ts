@@ -20,6 +20,7 @@ const passengerSchema = z.object({
 
 const createBookingSchema = z.object({
   flightId: z.number().int().positive("Invalid flight ID"),
+  contactPhone: z.string().trim().min(1, "Phone number is required").max(32),
   adults: z.number().int().min(0, "Adults cannot be negative"),
   children: z.number().int().min(0, "Children cannot be negative"),
   infants: z.number().int().min(0, "Infants cannot be negative"),
@@ -56,6 +57,72 @@ const bookingSummaryInclude = {
   passengers: true,
 };
 
+const flightDetailsInclude = {
+  airline: true,
+  departureAirport: true,
+  arrivalAirport: true,
+} satisfies Prisma.FlightInclude;
+
+type FlightWithDetails = Prisma.FlightGetPayload<{
+  include: typeof flightDetailsInclude;
+}>;
+
+type FlightWithChain = Omit<FlightWithDetails, "nextFlight"> & {
+  nextFlight: FlightWithChain | null;
+};
+
+const includeFlightChains = async <T extends { flight: FlightWithDetails }>(
+  bookings: T[],
+) => {
+  const flightsById = new Map(bookings.map(({ flight }) => [flight.id, flight]));
+  const loadedIds = new Set(flightsById.keys());
+  let pendingIds = bookings
+    .map(({ flight }) => flight.nextFlightId)
+    .filter((id): id is number => id !== null && !loadedIds.has(id));
+
+  while (pendingIds.length > 0) {
+    const nextFlights = await prisma.flight.findMany({
+      where: { id: { in: pendingIds } },
+      include: flightDetailsInclude,
+    });
+
+    pendingIds = [];
+
+    for (const flight of nextFlights) {
+      if (loadedIds.has(flight.id)) continue;
+
+      loadedIds.add(flight.id);
+      flightsById.set(flight.id, flight);
+
+      if (flight.nextFlightId !== null && !loadedIds.has(flight.nextFlightId)) {
+        pendingIds.push(flight.nextFlightId);
+      }
+    }
+  }
+
+  const buildFlightChain = (
+    flight: FlightWithDetails,
+    visitedIds: Set<number>,
+  ): FlightWithChain => {
+    const visited = new Set(visitedIds);
+    visited.add(flight.id);
+    const nextFlight =
+      flight.nextFlightId !== null && !visited.has(flight.nextFlightId)
+        ? flightsById.get(flight.nextFlightId)
+        : undefined;
+
+    return {
+      ...flight,
+      nextFlight: nextFlight ? buildFlightChain(nextFlight, visited) : null,
+    };
+  };
+
+  return bookings.map((booking) => ({
+    ...booking,
+    flight: buildFlightChain(booking.flight, new Set()),
+  }));
+};
+
 const getPagination = (req: AuthRequest) => {
   const page = Math.max(Number(req.query.page) || 1, 1);
   const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 100);
@@ -76,8 +143,8 @@ const hasDuplicatePassportNumbers = (
 const isUniqueConstraintError = (error: unknown) =>
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 
-export const cancelBookingRecord = async (bookingId: number) =>
-  prisma.$transaction(async (transaction) => {
+export const cancelBookingRecord = async (bookingId: number) => {
+  const booking = await prisma.$transaction(async (transaction) => {
     const existingBooking = await transaction.booking.findUnique({
       where: { id: bookingId },
       select: {
@@ -131,6 +198,9 @@ export const cancelBookingRecord = async (bookingId: number) =>
     });
   });
 
+  return (await includeFlightChains([booking]))[0]!;
+};
+
 export const createBooking = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) {
@@ -146,7 +216,7 @@ export const createBooking = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { flightId, adults, children, infants, passengers } = result.data;
+    const { flightId, contactPhone, adults, children, infants, passengers } = result.data;
     const totalPassengers = adults + children + infants;
 
     if (adults < 1) {
@@ -211,6 +281,7 @@ export const createBooking = async (req: AuthRequest, res: Response) => {
               totalPassengers,
               totalPrice: new Prisma.Decimal(currentFlight.price).mul(totalPassengers),
               currency: currentFlight.currency,
+              contactPhone,
               passengers: {
                 create: passengers,
               },
@@ -221,7 +292,7 @@ export const createBooking = async (req: AuthRequest, res: Response) => {
 
         return res.status(201).json({
           message: "Booking created successfully",
-          data: booking,
+          data: (await includeFlightChains([booking]))[0],
         });
       } catch (error) {
         if (isUniqueConstraintError(error) && attempt < 2) {
@@ -269,7 +340,7 @@ export const getMyBookings = async (req: AuthRequest, res: Response) => {
     ]);
 
     return res.json({
-      data: bookings,
+      data: await includeFlightChains(bookings),
       pagination: {
         page,
         limit,
@@ -308,7 +379,9 @@ export const getBookingById = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "You cannot access this booking" });
     }
 
-    return res.json({ data: booking });
+    return res.json({
+      data: booking ? (await includeFlightChains([booking]))[0] : null,
+    });
   } catch (error) {
     console.error("Get booking error:", error);
     return res.status(500).json({ message: "Failed to fetch booking" });

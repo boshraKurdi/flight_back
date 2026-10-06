@@ -5,12 +5,13 @@ import authRoutes from "./routes/auth.routes";
 import flightRoutes from "./routes/flight.routes";
 import bookingRoutes from "./routes/booking.routes";
 import adminBookingRoutes from "./routes/adminBooking.routes";
+import settingsRoutes from "./routes/settings.routes";
 
 const app = express();
 
 app.use(
   cors({
-    origin: "http://localhost:8080",
+    origin: ["http://localhost:8080", "http://localhost:8081"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
@@ -22,6 +23,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/flights", flightRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/admin/bookings", adminBookingRoutes);
+app.use("/api/settings", settingsRoutes);
 
 app.get("/", (req, res) => {
   res.json({

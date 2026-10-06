@@ -27,6 +27,13 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum FlightStatus {
+  SCHEDULED
+  DELAYED
+  CANCELLED
+  COMPLETED
+}
+
 model User {
   id        Int      @id @default(autoincrement())
   name      String
@@ -47,16 +54,16 @@ model Airline {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  flights   Flight[]
+  flights Flight[]
 }
 
 model Airport {
-  id        Int      @id @default(autoincrement())
-  name      String
-  city      String
-  country   String
-  code      String   @unique
-  timezone  String?
+  id       Int     @id @default(autoincrement())
+  name     String
+  city     String
+  country  String
+  code     String  @unique
+  timezone String?
 
   departureFlights Flight[] @relation("DepartureAirport")
   arrivalFlights   Flight[] @relation("ArrivalAirport")
@@ -70,19 +77,24 @@ model Flight {
 
   flightNumber String
 
-  airlineId Int
-  airline   Airline @relation(fields: [airlineId], references: [id])
-departureAirportId Int
-departureAirport   Airport @relation("DepartureAirport", fields: [departureAirportId], references: [id])
+  airlineId          Int
+  airline            Airline @relation(fields: [airlineId], references: [id])
+  departureAirportId Int
+  departureAirport   Airport @relation("DepartureAirport", fields: [departureAirportId], references: [id])
 
-arrivalAirportId Int
-arrivalAirport   Airport @relation("ArrivalAirport", fields: [arrivalAirportId], references: [id])
+  arrivalAirportId Int
+  arrivalAirport   Airport @relation("ArrivalAirport", fields: [arrivalAirportId], references: [id])
 
   departureTime DateTime
   arrivalTime   DateTime
 
-  price         Decimal @db.Decimal(10, 2)
-  currency      String  @default("USD")
+  nextFlightId    Int?
+  nextFlight      Flight?  @relation("FlightConnections", fields: [nextFlightId], references: [id], onDelete: SetNull)
+  previousFlights Flight[] @relation("FlightConnections")
+
+  status   FlightStatus @default(SCHEDULED)
+  price    Decimal      @db.Decimal(10, 2)
+  currency String       @default("USD")
 
   totalSeats     Int
   availableSeats Int
@@ -90,31 +102,32 @@ arrivalAirport   Airport @relation("ArrivalAirport", fields: [arrivalAirportId],
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  bookings Booking[]
+
   @@index([departureAirportId, arrivalAirportId])
   @@index([departureTime])
   @@index([airlineId])
-
-  bookings Booking[]
 }
 
 model Booking {
-  id              Int           @id @default(autoincrement())
+  id               Int           @id @default(autoincrement())
   bookingReference String        @unique
-  userId          Int
-  flightId        Int
-  adults          Int
-  children        Int
-  infants         Int
-  totalPassengers Int
-  totalPrice      Decimal       @db.Decimal(10, 2)
-  currency        String
-  status          BookingStatus @default(PENDING)
-  paymentStatus   PaymentStatus @default(UNPAID)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  userId           Int
+  flightId         Int
+  adults           Int
+  children         Int
+  infants          Int
+  totalPassengers  Int
+  totalPrice       Decimal       @db.Decimal(10, 2)
+  currency         String
+  contactPhone     String?       @db.VarChar(32)
+  status           BookingStatus @default(PENDING)
+  paymentStatus    PaymentStatus @default(UNPAID)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
-  user       User              @relation(fields: [userId], references: [id])
-  flight     Flight            @relation(fields: [flightId], references: [id])
+  user       User               @relation(fields: [userId], references: [id])
+  flight     Flight             @relation(fields: [flightId], references: [id])
   passengers BookingPassenger[]
 
   @@index([userId])
@@ -138,4 +151,15 @@ model BookingPassenger {
   booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   @@index([bookingId])
+}
+
+model Setting {
+  id            Int      @id @default(autoincrement())
+  contactPhone  String   @db.VarChar(32)
+  paymentCode   String   @db.VarChar(2048)
+  paymentQrCode String?  @db.LongText
+  createdAt     DateTime @default(now()) @db.DateTime(3)
+  updatedAt     DateTime @updatedAt @db.DateTime(3)
+
+  @@map("settings")
 }

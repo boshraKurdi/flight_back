@@ -3,6 +3,224 @@ import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { AuthRequest } from "../middlewares/auth.middleware";
 
+const flightDetailsInclude = {
+  airline: true,
+  departureAirport: true,
+  arrivalAirport: true,
+} satisfies Prisma.FlightInclude;
+
+type FlightWithDetails = Prisma.FlightGetPayload<{
+  include: typeof flightDetailsInclude;
+}>;
+
+type FlightWithChain = Omit<FlightWithDetails, "nextFlight"> & {
+  nextFlight: FlightWithChain | null;
+};
+
+type NewFlightData = {
+  flightNumber: string;
+  airlineId: number;
+  departureAirportId: number;
+  arrivalAirportId: number;
+  departureTime: Date;
+  arrivalTime: Date;
+  price: number;
+  currency: string;
+  totalSeats: number;
+  availableSeats: number;
+  status: FlightStatusValue;
+};
+
+const flightStatuses = ["SCHEDULED", "DELAYED", "CANCELLED", "COMPLETED"] as const;
+type FlightStatusValue = (typeof flightStatuses)[number];
+
+const normalizeFlightStatus = (value: unknown): FlightStatusValue | null => {
+  if (value === undefined) return "SCHEDULED";
+  return flightStatuses.find((candidate) => candidate === value) ?? null;
+};
+
+const normalizeFlightInput = (input: unknown): NewFlightData | string => {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return "Flight details must be an object";
+  }
+
+  const values = input as Record<string, unknown>;
+  const requiredFields = [
+    "flightNumber",
+    "airlineId",
+    "departureAirportId",
+    "arrivalAirportId",
+    "departureTime",
+    "arrivalTime",
+    "price",
+    "totalSeats",
+    "availableSeats",
+  ];
+
+  if (
+    requiredFields.some(
+      (field) =>
+        values[field] === undefined ||
+        values[field] === null ||
+        values[field] === "",
+    )
+  ) {
+    return "All required flight fields must be provided";
+  }
+
+  const airlineId = Number(values.airlineId);
+  const departureAirportId = Number(values.departureAirportId);
+  const arrivalAirportId = Number(values.arrivalAirportId);
+  const price = Number(values.price);
+  const totalSeats = Number(values.totalSeats);
+  const availableSeats = Number(values.availableSeats);
+  const departureTime = new Date(String(values.departureTime));
+  const arrivalTime = new Date(String(values.arrivalTime));
+  const status = normalizeFlightStatus(values.status);
+
+  if (
+    !Number.isInteger(airlineId) ||
+    airlineId < 1 ||
+    !Number.isInteger(departureAirportId) ||
+    departureAirportId < 1 ||
+    !Number.isInteger(arrivalAirportId) ||
+    arrivalAirportId < 1
+  ) {
+    return "Airline and airport IDs must be positive integers";
+  }
+
+  if (departureAirportId === arrivalAirportId) {
+    return "Departure and arrival airports must be different";
+  }
+
+  if (
+    !Number.isFinite(price) ||
+    !Number.isInteger(totalSeats) ||
+    !Number.isInteger(availableSeats)
+  ) {
+    return "Invalid price or seat values";
+  }
+
+  if (availableSeats > totalSeats) {
+    return "Available seats cannot exceed total seats";
+  }
+
+  if (availableSeats < 0 || totalSeats < 1) {
+    return "Invalid seat values";
+  }
+
+  if (!status) {
+    return "Invalid flight status";
+  }
+
+  if (
+    Number.isNaN(departureTime.getTime()) ||
+    Number.isNaN(arrivalTime.getTime())
+  ) {
+    return "Invalid departure or arrival time";
+  }
+
+  if (arrivalTime <= departureTime) {
+    return "Arrival time must be after departure time";
+  }
+
+  return {
+    flightNumber: String(values.flightNumber),
+    airlineId,
+    departureAirportId,
+    arrivalAirportId,
+    departureTime,
+    arrivalTime,
+    price,
+    currency: values.currency ? String(values.currency) : "USD",
+    totalSeats,
+    availableSeats,
+    status,
+  };
+};
+
+const getFlightChainIds = async (
+  client: Prisma.TransactionClient | typeof prisma,
+  firstFlightId: number,
+): Promise<number[]> => {
+  const ids: number[] = [];
+  const visitedIds = new Set<number>();
+  let currentFlightId: number | null = firstFlightId;
+
+  while (currentFlightId !== null && !visitedIds.has(currentFlightId)) {
+    visitedIds.add(currentFlightId);
+
+    const flight: { id: number; nextFlightId: number | null } | null =
+      await client.flight.findUnique({
+        where: { id: currentFlightId },
+        select: { id: true, nextFlightId: true },
+      });
+
+    if (!flight) {
+      break;
+    }
+
+    ids.push(flight.id);
+    currentFlightId = flight.nextFlightId;
+  }
+
+  return ids;
+};
+
+const includeFlightChains = async (
+  flights: FlightWithDetails[],
+): Promise<FlightWithChain[]> => {
+  const flightsById = new Map(flights.map((flight) => [flight.id, flight]));
+  const loadedIds = new Set(flightsById.keys());
+  let pendingIds = flights
+    .map((flight) => flight.nextFlightId)
+    .filter((id): id is number => id !== null && !loadedIds.has(id));
+
+  while (pendingIds.length > 0) {
+    const nextFlights = await prisma.flight.findMany({
+      where: { id: { in: pendingIds } },
+      include: flightDetailsInclude,
+    });
+
+    pendingIds = [];
+
+    for (const flight of nextFlights) {
+      if (loadedIds.has(flight.id)) {
+        continue;
+      }
+
+      loadedIds.add(flight.id);
+      flightsById.set(flight.id, flight);
+
+      if (flight.nextFlightId !== null && !loadedIds.has(flight.nextFlightId)) {
+        pendingIds.push(flight.nextFlightId);
+      }
+    }
+  }
+
+  const buildFlightChain = (
+    flight: FlightWithDetails,
+    visitedIds: Set<number>,
+  ): FlightWithChain => {
+    const visited = new Set(visitedIds);
+    visited.add(flight.id);
+
+    const nextFlight =
+      flight.nextFlightId === null || visited.has(flight.nextFlightId)
+        ? null
+        : flightsById.get(flight.nextFlightId);
+
+    return {
+      ...flight,
+      nextFlight: nextFlight
+        ? buildFlightChain(nextFlight, visited)
+        : null,
+    };
+  };
+
+  return flights.map((flight) => buildFlightChain(flight, new Set()));
+};
+
 // GET /api/flights
 export const getFlights = async (req: AuthRequest, res: Response) => {
   try {
@@ -54,11 +272,7 @@ export const getFlights = async (req: AuthRequest, res: Response) => {
     const [flights, total] = await Promise.all([
       prisma.flight.findMany({
         where,
-        include: {
-          airline: true,
-          departureAirport: true,
-          arrivalAirport: true,
-        },
+        include: flightDetailsInclude,
         orderBy: {
           departureTime: "asc",
         },
@@ -70,7 +284,7 @@ export const getFlights = async (req: AuthRequest, res: Response) => {
     ]);
 
     return res.json({
-      data: flights,
+      data: await includeFlightChains(flights),
       pagination: {
         page,
         limit,
@@ -85,6 +299,23 @@ export const getFlights = async (req: AuthRequest, res: Response) => {
 
     return res.status(500).json({
       message,
+    });
+  }
+};
+
+// GET /api/flights/airports
+export const getAirports = async (_req: AuthRequest, res: Response) => {
+  try {
+    const airports = await prisma.airport.findMany({
+      orderBy: [{ city: "asc" }, { name: "asc" }],
+    });
+
+    return res.json({ data: airports });
+  } catch (error) {
+    console.error("Get airports error:", error);
+
+    return res.status(500).json({
+      message: "Failed to fetch airports",
     });
   }
 };
@@ -239,16 +470,12 @@ export const searchFlights = async (req: AuthRequest, res: Response) => {
 
     const flights = await prisma.flight.findMany({
       where,
-      include: {
-        airline: true,
-        departureAirport: true,
-        arrivalAirport: true,
-      },
+      include: flightDetailsInclude,
       orderBy,
     });
 
     return res.json({
-      data: flights,
+      data: await includeFlightChains(flights),
       count: flights.length,
     });
   } catch (error) {
@@ -275,11 +502,7 @@ export const getFlightById = async (req: AuthRequest, res: Response) => {
       where: {
         id,
       },
-      include: {
-        airline: true,
-        departureAirport: true,
-        arrivalAirport: true,
-      },
+      include: flightDetailsInclude,
     });
 
     if (!flight) {
@@ -289,7 +512,7 @@ export const getFlightById = async (req: AuthRequest, res: Response) => {
     }
 
     return res.json({
-      data: flight,
+      data: (await includeFlightChains([flight]))[0],
     });
   } catch (error) {
     console.error("Get flight error:", error);
@@ -303,6 +526,99 @@ export const getFlightById = async (req: AuthRequest, res: Response) => {
 // POST /api/flights
 export const createFlight = async (req: AuthRequest, res: Response) => {
   try {
+    if (req.body?.segments !== undefined) {
+      if (!Array.isArray(req.body.segments) || req.body.segments.length < 1) {
+        return res.status(400).json({
+          message: "At least one flight segment is required",
+        });
+      }
+
+      const segments: NewFlightData[] = [];
+
+      for (const [index, segment] of req.body.segments.entries()) {
+        const normalizedSegment = normalizeFlightInput(segment);
+
+        if (typeof normalizedSegment === "string") {
+          return res.status(400).json({
+            message: `Invalid segment ${index + 1}: ${normalizedSegment}`,
+          });
+        }
+
+        segments.push(normalizedSegment);
+      }
+
+      for (const [index, segment] of segments.entries()) {
+        const [airline, departureAirport, arrivalAirport] = await Promise.all([
+          prisma.airline.findUnique({
+            where: { id: segment.airlineId },
+            select: { id: true },
+          }),
+          prisma.airport.findUnique({
+            where: { id: segment.departureAirportId },
+            select: { id: true },
+          }),
+          prisma.airport.findUnique({
+            where: { id: segment.arrivalAirportId },
+            select: { id: true },
+          }),
+        ]);
+
+        if (!airline) {
+          return res.status(400).json({
+            message: `Airline not found for segment ${index + 1}`,
+          });
+        }
+
+        if (!departureAirport || !arrivalAirport) {
+          return res.status(400).json({
+            message: `Airport not found for segment ${index + 1}`,
+          });
+        }
+      }
+
+      const firstFlight = await prisma.$transaction(async (transaction) => {
+        const createdFlights: Array<{ id: number }> = [];
+
+        for (const segment of segments) {
+          const createdFlight = await transaction.flight.create({
+            data: segment,
+            select: { id: true },
+          });
+          createdFlights.push(createdFlight);
+        }
+
+        for (let index = 0; index < createdFlights.length - 1; index += 1) {
+          const currentFlight = createdFlights[index];
+          const nextFlight = createdFlights[index + 1];
+
+          if (!currentFlight || !nextFlight) {
+            throw new Error("Failed to connect flight segments");
+          }
+
+          await transaction.flight.update({
+            where: { id: currentFlight.id },
+            data: { nextFlightId: nextFlight.id },
+          });
+        }
+
+        const flight = await transaction.flight.findUnique({
+          where: { id: createdFlights[0]!.id },
+          include: flightDetailsInclude,
+        });
+
+        if (!flight) {
+          throw new Error("Failed to load the created flight itinerary");
+        }
+
+        return flight;
+      });
+
+      return res.status(201).json({
+        message: "Flight itinerary created successfully",
+        data: (await includeFlightChains([firstFlight]))[0],
+      });
+    }
+
     const {
       flightNumber,
       airlineId,
@@ -314,6 +630,8 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
       currency,
       totalSeats,
       availableSeats,
+      status,
+      nextFlightId,
     } = req.body;
 
     if (
@@ -368,6 +686,39 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    const normalizedStatus = normalizeFlightStatus(status);
+    if (!normalizedStatus) {
+      return res.status(400).json({
+        message: "Invalid flight status",
+      });
+    }
+
+    let normalizedNextFlightId: number | null = null;
+
+    if (nextFlightId !== undefined && nextFlightId !== null) {
+      normalizedNextFlightId = Number(nextFlightId);
+
+      if (
+        !Number.isInteger(normalizedNextFlightId) ||
+        normalizedNextFlightId < 1
+      ) {
+        return res.status(400).json({
+          message: "Invalid next flight ID",
+        });
+      }
+
+      const nextFlight = await prisma.flight.findUnique({
+        where: { id: normalizedNextFlightId },
+        select: { id: true },
+      });
+
+      if (!nextFlight) {
+        return res.status(400).json({
+          message: "Next flight not found",
+        });
+      }
+    }
+
     const airline = await prisma.airline.findUnique({
       where: {
         id: Number(airlineId),
@@ -410,17 +761,15 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
         currency: currency || "USD",
         totalSeats: Number(totalSeats),
         availableSeats: Number(availableSeats),
+        status: normalizedStatus,
+        nextFlightId: normalizedNextFlightId,
       },
-      include: {
-        airline: true,
-        departureAirport: true,
-        arrivalAirport: true,
-      },
+      include: flightDetailsInclude,
     });
 
     return res.status(201).json({
       message: "Flight created successfully",
-      data: flight,
+      data: (await includeFlightChains([flight]))[0],
     });
   } catch (error) {
     console.error("Create flight error:", error);
@@ -454,6 +803,127 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    if (req.body?.segments !== undefined) {
+      if (!Array.isArray(req.body.segments) || req.body.segments.length < 1) {
+        return res.status(400).json({
+          message: "At least one flight segment is required",
+        });
+      }
+
+      const segments: NewFlightData[] = [];
+
+      for (const [index, segment] of req.body.segments.entries()) {
+        const normalizedSegment = normalizeFlightInput(segment);
+
+        if (typeof normalizedSegment === "string") {
+          return res.status(400).json({
+            message: `Invalid segment ${index + 1}: ${normalizedSegment}`,
+          });
+        }
+
+        segments.push(normalizedSegment);
+      }
+
+      for (const [index, segment] of segments.entries()) {
+        const [airline, departureAirport, arrivalAirport] = await Promise.all([
+          prisma.airline.findUnique({
+            where: { id: segment.airlineId },
+            select: { id: true },
+          }),
+          prisma.airport.findUnique({
+            where: { id: segment.departureAirportId },
+            select: { id: true },
+          }),
+          prisma.airport.findUnique({
+            where: { id: segment.arrivalAirportId },
+            select: { id: true },
+          }),
+        ]);
+
+        if (!airline) {
+          return res.status(400).json({
+            message: `Airline not found for segment ${index + 1}`,
+          });
+        }
+
+        if (!departureAirport || !arrivalAirport) {
+          return res.status(400).json({
+            message: `Airport not found for segment ${index + 1}`,
+          });
+        }
+      }
+
+      const updatedFlight = await prisma.$transaction(async (transaction) => {
+        const existingFlightIds = await getFlightChainIds(transaction, id);
+
+        if (existingFlightIds.length === 0) {
+          throw new Error("FLIGHT_NOT_FOUND");
+        }
+
+        const removedFlightIds = existingFlightIds.slice(segments.length);
+
+        if (removedFlightIds.length > 0) {
+          const bookingCount = await transaction.booking.count({
+            where: { flightId: { in: removedFlightIds } },
+          });
+
+          if (bookingCount > 0) {
+            throw new Error("FLIGHT_ITINERARY_HAS_BOOKINGS");
+          }
+        }
+
+        const flightIds: number[] = [];
+
+        for (const [index, segment] of segments.entries()) {
+          const existingSegmentId = existingFlightIds[index];
+
+          const flight = existingSegmentId
+            ? await transaction.flight.update({
+                where: { id: existingSegmentId },
+                data: segment,
+                select: { id: true },
+              })
+            : await transaction.flight.create({
+                data: segment,
+                select: { id: true },
+              });
+
+          flightIds.push(flight.id);
+        }
+
+        for (const [index, flightId] of flightIds.entries()) {
+          await transaction.flight.update({
+            where: { id: flightId },
+            data: {
+              nextFlightId: flightIds[index + 1] ?? null,
+            },
+          });
+        }
+
+        if (removedFlightIds.length > 0) {
+          await transaction.flight.deleteMany({
+            where: { id: { in: removedFlightIds } },
+          });
+        }
+
+        const flight = await transaction.flight.findUnique({
+          where: { id },
+          include: flightDetailsInclude,
+        });
+
+        if (!flight) {
+          throw new Error("FLIGHT_NOT_FOUND");
+        }
+
+        return flight;
+      });
+
+      return res.json({
+        message: "Flight itinerary updated successfully",
+        data: (await includeFlightChains([updatedFlight]))[0],
+      });
+    }
+
     const {
       flightNumber,
       airlineId,
@@ -465,6 +935,8 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
       currency,
       totalSeats,
       availableSeats,
+      status,
+      nextFlightId,
     } = req.body;
 
     const data: Prisma.FlightUpdateInput = {};
@@ -521,24 +993,96 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
       data.availableSeats = Number(availableSeats);
     }
 
+    if (status !== undefined) {
+      const normalizedStatus = normalizeFlightStatus(status);
+      if (!normalizedStatus) {
+        return res.status(400).json({
+          message: "Invalid flight status",
+        });
+      }
+      data.status = normalizedStatus;
+    }
+
+    if (nextFlightId !== undefined) {
+      if (nextFlightId === null) {
+        data.nextFlight = {
+          disconnect: true,
+        };
+      } else {
+        const normalizedNextFlightId = Number(nextFlightId);
+
+        if (
+          !Number.isInteger(normalizedNextFlightId) ||
+          normalizedNextFlightId < 1
+        ) {
+          return res.status(400).json({
+            message: "Invalid next flight ID",
+          });
+        }
+
+        if (normalizedNextFlightId === id) {
+          return res.status(400).json({
+            message: "A flight cannot be its own next flight",
+          });
+        }
+
+        const nextFlight = await prisma.flight.findUnique({
+          where: { id: normalizedNextFlightId },
+          select: { id: true },
+        });
+
+        if (!nextFlight) {
+          return res.status(400).json({
+            message: "Next flight not found",
+          });
+        }
+
+        data.nextFlight = {
+          connect: {
+            id: normalizedNextFlightId,
+          },
+        };
+      }
+    }
+
     const updatedFlight = await prisma.flight.update({
       where: {
         id,
       },
       data,
-      include: {
-        airline: true,
-        departureAirport: true,
-        arrivalAirport: true,
-      },
+      include: flightDetailsInclude,
     });
 
     return res.json({
       message: "Flight updated successfully",
-      data: updatedFlight,
+      data: (await includeFlightChains([updatedFlight]))[0],
     });
   } catch (error) {
     console.error("Update flight error:", error);
+
+    if (error instanceof Error && error.message === "FLIGHT_NOT_FOUND") {
+      return res.status(404).json({
+        message: "Flight not found",
+      });
+    }
+
+    if (
+      error instanceof Error &&
+      error.message === "FLIGHT_ITINERARY_HAS_BOOKINGS"
+    ) {
+      return res.status(409).json({
+        message: "Cannot remove flight segments that have bookings",
+      });
+    }
+
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2003"
+    ) {
+      return res.status(409).json({
+        message: "Cannot remove flight segments that have bookings",
+      });
+    }
 
     return res.status(500).json({
       message: "Failed to update flight",
@@ -561,6 +1105,7 @@ export const deleteFlight = async (req: AuthRequest, res: Response) => {
       where: {
         id,
       },
+      select: { id: true },
     });
 
     if (!flight) {
@@ -569,17 +1114,47 @@ export const deleteFlight = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    await prisma.flight.delete({
-      where: {
-        id,
-      },
+    const deletedCount = await prisma.$transaction(async (transaction) => {
+      const flightIds = await getFlightChainIds(transaction, id);
+      const bookingCount = await transaction.booking.count({
+        where: { flightId: { in: flightIds } },
+      });
+
+      if (bookingCount > 0) {
+        throw new Error("FLIGHT_ITINERARY_HAS_BOOKINGS");
+      }
+
+      const result = await transaction.flight.deleteMany({
+        where: { id: { in: flightIds } },
+      });
+
+      return result.count;
     });
 
     return res.json({
-      message: "Flight deleted successfully",
+      message: "Flight itinerary deleted successfully",
+      deletedFlights: deletedCount,
     });
   } catch (error) {
     console.error("Delete flight error:", error);
+
+    if (
+      error instanceof Error &&
+      error.message === "FLIGHT_ITINERARY_HAS_BOOKINGS"
+    ) {
+      return res.status(409).json({
+        message: "Cannot delete a flight itinerary that has bookings",
+      });
+    }
+
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2003"
+    ) {
+      return res.status(409).json({
+        message: "Cannot delete a flight itinerary that has bookings",
+      });
+    }
 
     return res.status(500).json({
       message: "Failed to delete flight",
