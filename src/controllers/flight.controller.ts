@@ -31,12 +31,23 @@ type NewFlightData = {
   status: FlightStatusValue;
 };
 
-const flightStatuses = ["SCHEDULED", "DELAYED", "CANCELLED", "COMPLETED"] as const;
+const flightStatuses = [
+  "SCHEDULED",
+  "DELAYED",
+  "CANCELLED",
+  "COMPLETED",
+] as const;
 type FlightStatusValue = (typeof flightStatuses)[number];
 
 const normalizeFlightStatus = (value: unknown): FlightStatusValue | null => {
   if (value === undefined) return "SCHEDULED";
-  return flightStatuses.find((candidate) => candidate === value) ?? null;
+  return flightStatuses.find(candidate => candidate === value) ?? null;
+};
+
+const isBeforeToday = (date: Date) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return date < today;
 };
 
 const normalizeFlightInput = (input: unknown): NewFlightData | string => {
@@ -59,10 +70,10 @@ const normalizeFlightInput = (input: unknown): NewFlightData | string => {
 
   if (
     requiredFields.some(
-      (field) =>
+      field =>
         values[field] === undefined ||
         values[field] === null ||
-        values[field] === "",
+        values[field] === ""
     )
   ) {
     return "All required flight fields must be provided";
@@ -124,6 +135,10 @@ const normalizeFlightInput = (input: unknown): NewFlightData | string => {
     return "Arrival time must be after departure time";
   }
 
+  if (isBeforeToday(departureTime) || isBeforeToday(arrivalTime)) {
+    return "Flight dates cannot be before today";
+  }
+
   return {
     flightNumber: String(values.flightNumber),
     airlineId,
@@ -139,9 +154,22 @@ const normalizeFlightInput = (input: unknown): NewFlightData | string => {
   };
 };
 
+const getConnectionTimeError = (segments: NewFlightData[]) => {
+  for (let index = 1; index < segments.length; index += 1) {
+    const previous = segments[index - 1];
+    const current = segments[index];
+
+    if (previous && current && current.departureTime < previous.arrivalTime) {
+      return `Flight segment ${index + 1} must depart at or after the previous segment arrives`;
+    }
+  }
+
+  return null;
+};
+
 const getFlightChainIds = async (
   client: Prisma.TransactionClient | typeof prisma,
-  firstFlightId: number,
+  firstFlightId: number
 ): Promise<number[]> => {
   const ids: number[] = [];
   const visitedIds = new Set<number>();
@@ -168,12 +196,12 @@ const getFlightChainIds = async (
 };
 
 const includeFlightChains = async (
-  flights: FlightWithDetails[],
+  flights: FlightWithDetails[]
 ): Promise<FlightWithChain[]> => {
-  const flightsById = new Map(flights.map((flight) => [flight.id, flight]));
+  const flightsById = new Map(flights.map(flight => [flight.id, flight]));
   const loadedIds = new Set(flightsById.keys());
   let pendingIds = flights
-    .map((flight) => flight.nextFlightId)
+    .map(flight => flight.nextFlightId)
     .filter((id): id is number => id !== null && !loadedIds.has(id));
 
   while (pendingIds.length > 0) {
@@ -200,7 +228,7 @@ const includeFlightChains = async (
 
   const buildFlightChain = (
     flight: FlightWithDetails,
-    visitedIds: Set<number>,
+    visitedIds: Set<number>
   ): FlightWithChain => {
     const visited = new Set(visitedIds);
     visited.add(flight.id);
@@ -212,13 +240,11 @@ const includeFlightChains = async (
 
     return {
       ...flight,
-      nextFlight: nextFlight
-        ? buildFlightChain(nextFlight, visited)
-        : null,
+      nextFlight: nextFlight ? buildFlightChain(nextFlight, visited) : null,
     };
   };
 
-  return flights.map((flight) => buildFlightChain(flight, new Set()));
+  return flights.map(flight => buildFlightChain(flight, new Set()));
 };
 
 // GET /api/flights
@@ -236,22 +262,20 @@ export const getFlights = async (req: AuthRequest, res: Response) => {
       ? Number(req.query.maxPrice)
       : undefined;
 
-    const airline = req.query.airline
-      ? String(req.query.airline)
-      : undefined;
+    const airline = req.query.airline ? String(req.query.airline) : undefined;
 
     const where: Prisma.FlightWhereInput = {};
 
     if (minPrice !== undefined && !Number.isNaN(minPrice)) {
       where.price = {
-        ...(where.price as Prisma.DecimalFilter ?? {}),
+        ...((where.price as Prisma.DecimalFilter) ?? {}),
         gte: minPrice,
       };
     }
 
     if (maxPrice !== undefined && !Number.isNaN(maxPrice)) {
       where.price = {
-        ...(where.price as Prisma.DecimalFilter ?? {}),
+        ...((where.price as Prisma.DecimalFilter) ?? {}),
         lte: maxPrice,
       };
     }
@@ -327,17 +351,13 @@ export const searchFlights = async (req: AuthRequest, res: Response) => {
       ? String(req.query.from).toUpperCase()
       : undefined;
 
-    const to = req.query.to
-      ? String(req.query.to).toUpperCase()
-      : undefined;
+    const to = req.query.to ? String(req.query.to).toUpperCase() : undefined;
 
     const departureDate = req.query.departureDate
       ? String(req.query.departureDate)
       : undefined;
 
-    const passengers = req.query.passengers
-      ? Number(req.query.passengers)
-      : 1;
+    const passengers = req.query.passengers ? Number(req.query.passengers) : 1;
 
     const minPrice = req.query.minPrice
       ? Number(req.query.minPrice)
@@ -347,13 +367,9 @@ export const searchFlights = async (req: AuthRequest, res: Response) => {
       ? Number(req.query.maxPrice)
       : undefined;
 
-    const airline = req.query.airline
-      ? String(req.query.airline)
-      : undefined;
+    const airline = req.query.airline ? String(req.query.airline) : undefined;
 
-    const sortBy = req.query.sortBy
-      ? String(req.query.sortBy)
-      : "departure";
+    const sortBy = req.query.sortBy ? String(req.query.sortBy) : "departure";
 
     if (passengers < 1 || Number.isNaN(passengers)) {
       return res.status(400).json({
@@ -547,6 +563,11 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
         segments.push(normalizedSegment);
       }
 
+      const connectionTimeError = getConnectionTimeError(segments);
+      if (connectionTimeError) {
+        return res.status(400).json({ message: connectionTimeError });
+      }
+
       for (const [index, segment] of segments.entries()) {
         const [airline, departureAirport, arrivalAirport] = await Promise.all([
           prisma.airline.findUnique({
@@ -576,7 +597,7 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
         }
       }
 
-      const firstFlight = await prisma.$transaction(async (transaction) => {
+      const firstFlight = await prisma.$transaction(async transaction => {
         const createdFlights: Array<{ id: number }> = [];
 
         for (const segment of segments) {
@@ -671,10 +692,7 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
     const departure = new Date(departureTime);
     const arrival = new Date(arrivalTime);
 
-    if (
-      Number.isNaN(departure.getTime()) ||
-      Number.isNaN(arrival.getTime())
-    ) {
+    if (Number.isNaN(departure.getTime()) || Number.isNaN(arrival.getTime())) {
       return res.status(400).json({
         message: "Invalid departure or arrival time",
       });
@@ -683,6 +701,12 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
     if (arrival <= departure) {
       return res.status(400).json({
         message: "Arrival time must be after departure time",
+      });
+    }
+
+    if (isBeforeToday(departure) || isBeforeToday(arrival)) {
+      return res.status(400).json({
+        message: "Flight dates cannot be before today",
       });
     }
 
@@ -824,6 +848,11 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
         segments.push(normalizedSegment);
       }
 
+      const connectionTimeError = getConnectionTimeError(segments);
+      if (connectionTimeError) {
+        return res.status(400).json({ message: connectionTimeError });
+      }
+
       for (const [index, segment] of segments.entries()) {
         const [airline, departureAirport, arrivalAirport] = await Promise.all([
           prisma.airline.findUnique({
@@ -853,7 +882,7 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
         }
       }
 
-      const updatedFlight = await prisma.$transaction(async (transaction) => {
+      const updatedFlight = await prisma.$transaction(async transaction => {
         const existingFlightIds = await getFlightChainIds(transaction, id);
 
         if (existingFlightIds.length === 0) {
@@ -975,6 +1004,15 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
 
     if (arrivalTime !== undefined) {
       data.arrivalTime = new Date(arrivalTime);
+    }
+
+    if (
+      (departureTime !== undefined && isBeforeToday(new Date(departureTime))) ||
+      (arrivalTime !== undefined && isBeforeToday(new Date(arrivalTime)))
+    ) {
+      return res.status(400).json({
+        message: "Flight dates cannot be before today",
+      });
     }
 
     if (price !== undefined) {
@@ -1114,7 +1152,7 @@ export const deleteFlight = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const deletedCount = await prisma.$transaction(async (transaction) => {
+    const deletedCount = await prisma.$transaction(async transaction => {
       const flightIds = await getFlightChainIds(transaction, id);
       const bookingCount = await transaction.booking.count({
         where: { flightId: { in: flightIds } },
