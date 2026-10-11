@@ -18,6 +18,7 @@ app.use(
       "http://localhost:8080",
       "http://localhost:8081",
       "https://atyketo.com",
+      "https://atyketo.atyketo.com",
       ...(process.env.FRONTEND_ORIGIN ?? "")
         .split(",")
         .map((origin) => origin.trim())
