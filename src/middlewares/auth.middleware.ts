@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
+import prisma from "../lib/prisma";
 
 export interface AuthUser {
   userId: number;
@@ -15,57 +16,80 @@ export const authenticate = (
   res: Response,
   next: NextFunction
 ) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    res.status(401).json({
+      message: "Authentication required",
+    });
+    return;
+  }
+
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    res.status(401).json({
+      message: "Authentication required",
+    });
+    return;
+  }
+
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    console.error("JWT_SECRET is missing");
+    res.status(500).json({
+      message: "Server configuration error",
+    });
+    return;
+  }
+
+  let authUser: AuthUser;
   try {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({
-        message: "Authentication required",
-      });
-    }
-
-    const token = authHeader.split(" ")[1];
-
-    if (!token) {
-      return res.status(401).json({
-        message: "Authentication required",
-      });
-    }
-
-    const jwtSecret = process.env.JWT_SECRET;
-
-    if (!jwtSecret) {
-      console.error("JWT_SECRET is missing");
-
-      return res.status(500).json({
-        message: "Server configuration error",
-      });
-    }
-
-    const decoded = jwt.verify(token, jwtSecret);
-
+    const payload = jwt.verify(token, jwtSecret);
     if (
-      typeof decoded !== "object" ||
-      decoded === null ||
-      typeof decoded.userId !== "number" ||
-      (decoded.role !== "USER" && decoded.role !== "ADMIN")
+      typeof payload !== "object" ||
+      payload === null ||
+      typeof payload.userId !== "number" ||
+      (payload.role !== "USER" && payload.role !== "ADMIN")
     ) {
-      return res.status(401).json({
-        message: "Invalid token",
-      });
+      res.status(401).json({ message: "Invalid token" });
+      return;
     }
-
-    req.user = {
-      userId: decoded.userId,
-      role: decoded.role,
-    };
-
-    next();
-  } catch (error) {
-    return res.status(401).json({
+    authUser = { userId: payload.userId, role: payload.role };
+  } catch {
+    res.status(401).json({
       message: "Invalid or expired token",
     });
+    return;
   }
+
+  void prisma.user
+    .findUnique({
+      where: { id: authUser.userId },
+      select: { role: true, active: true },
+    })
+    .then((user) => {
+      if (!user || !user.active) {
+        res.status(401).json({ message: "Account is disabled or no longer exists" });
+        return;
+      }
+      req.user = { userId: authUser.userId, role: user.role };
+      next();
+    })
+    .catch((error: unknown) => {
+      console.error("Authentication lookup error:", error);
+      res.status(500).json({ message: "Failed to authenticate request" });
+    });
+};
+
+export const optionalAuthenticate = (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  if (!req.headers.authorization) {
+    next();
+    return;
+  }
+  authenticate(req, res, next);
 };
 
 export const requireAdmin = (

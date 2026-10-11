@@ -8,6 +8,7 @@ import flightRoutes from "./routes/flight.routes";
 import bookingRoutes from "./routes/booking.routes";
 import adminBookingRoutes from "./routes/adminBooking.routes";
 import settingsRoutes from "./routes/settings.routes";
+import adminPanelRoutes from "./routes/adminPanel.routes";
 
 const app = express();
 
@@ -17,14 +18,19 @@ app.use(
       "http://localhost:8080",
       "http://localhost:8081",
       "https://atyketo.com",
+      ...(process.env.FRONTEND_ORIGIN ?? "")
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "6mb" }));
 
+app.use("/api", adminPanelRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/flights", flightRoutes);
 app.use("/api/bookings", bookingRoutes);

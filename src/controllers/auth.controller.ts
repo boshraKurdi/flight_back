@@ -120,6 +120,12 @@ export const login = async (req: Request, res: Response) => {
       });
     }
 
+    if (!user.active) {
+      return res.status(403).json({
+        message: "This account is disabled. Contact an administrator.",
+      });
+    }
+
     const jwtSecret = process.env.JWT_SECRET;
 
     if (!jwtSecret) {
@@ -130,15 +136,16 @@ export const login = async (req: Request, res: Response) => {
       });
     }
 
+    const expiresIn: NonNullable<jwt.SignOptions["expiresIn"]> =
+      (process.env.JWT_EXPIRES_IN as NonNullable<jwt.SignOptions["expiresIn"]> | undefined) ??
+      "7d";
     const token = jwt.sign(
       {
         userId: user.id,
         role: user.role,
       },
       jwtSecret,
-      {
-        expiresIn: process.env.JWT_EXPIRES_IN || "7d",
-      }
+      { expiresIn }
     );
 
     return res.status(200).json({

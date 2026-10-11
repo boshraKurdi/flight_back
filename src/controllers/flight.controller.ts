@@ -258,6 +258,48 @@ const includeFlightChains = async (
   return flights.map(flight => buildFlightChain(flight, new Set()));
 };
 
+type PanelFlightOutput = {
+  id: string;
+  flightNumber: string;
+  airlineId: string;
+  airlineName: string;
+  departureAirportId: string;
+  departureAirportCode: string;
+  arrivalAirportId: string;
+  arrivalAirportCode: string;
+  departureTime: string;
+  arrivalTime: string;
+  price: number;
+  currency: string;
+  totalSeats: number;
+  availableSeats: number;
+  status: FlightWithDetails["status"];
+  createdAt: string;
+  nextFlightId: string | null;
+  nextFlight: PanelFlightOutput | null;
+};
+
+const mapFlightForPanel = (flight: FlightWithChain): PanelFlightOutput => ({
+  id: String(flight.id),
+  flightNumber: flight.flightNumber,
+  airlineId: String(flight.airlineId),
+  airlineName: flight.airline.name,
+  departureAirportId: String(flight.departureAirportId),
+  departureAirportCode: flight.departureAirport.code,
+  arrivalAirportId: String(flight.arrivalAirportId),
+  arrivalAirportCode: flight.arrivalAirport.code,
+  departureTime: flight.departureTime.toISOString(),
+  arrivalTime: flight.arrivalTime.toISOString(),
+  price: Number(flight.price),
+  currency: flight.currency,
+  totalSeats: flight.totalSeats,
+  availableSeats: flight.availableSeats,
+  status: flight.status,
+  createdAt: flight.createdAt.toISOString(),
+  nextFlightId: flight.nextFlightId === null ? null : String(flight.nextFlightId),
+  nextFlight: flight.nextFlight ? mapFlightForPanel(flight.nextFlight) : null,
+});
+
 // GET /api/flights
 export const getFlights = async (req: AuthRequest, res: Response) => {
   try {
@@ -645,10 +687,8 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
         return flight;
       });
 
-      return res.status(201).json({
-        message: "Flight itinerary created successfully",
-        data: (await includeFlightChains([firstFlight]))[0],
-      });
+      const flight = (await includeFlightChains([firstFlight]))[0];
+      return res.status(201).json(flight ? mapFlightForPanel(flight) : null);
     }
 
     const {
@@ -802,10 +842,8 @@ export const createFlight = async (req: AuthRequest, res: Response) => {
       include: flightDetailsInclude,
     });
 
-    return res.status(201).json({
-      message: "Flight created successfully",
-      data: (await includeFlightChains([flight]))[0],
-    });
+    const createdFlight = (await includeFlightChains([flight]))[0];
+    return res.status(201).json(createdFlight ? mapFlightForPanel(createdFlight) : null);
   } catch (error) {
     console.error("Create flight error:", error);
 
@@ -958,10 +996,8 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
         return flight;
       });
 
-      return res.json({
-        message: "Flight itinerary updated successfully",
-        data: (await includeFlightChains([updatedFlight]))[0],
-      });
+      const flight = (await includeFlightChains([updatedFlight]))[0];
+      return res.json(flight ? mapFlightForPanel(flight) : null);
     }
 
     const {
@@ -1102,10 +1138,8 @@ export const updateFlight = async (req: AuthRequest, res: Response) => {
       include: flightDetailsInclude,
     });
 
-    return res.json({
-      message: "Flight updated successfully",
-      data: (await includeFlightChains([updatedFlight]))[0],
-    });
+    const flight = (await includeFlightChains([updatedFlight]))[0];
+    return res.json(flight ? mapFlightForPanel(flight) : null);
   } catch (error) {
     console.error("Update flight error:", error);
 
@@ -1163,7 +1197,7 @@ export const deleteFlight = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const deletedCount = await prisma.$transaction(async transaction => {
+    await prisma.$transaction(async transaction => {
       const flightIds = await getFlightChainIds(transaction, id);
       const bookingCount = await transaction.booking.count({
         where: { flightId: { in: flightIds } },
@@ -1180,10 +1214,7 @@ export const deleteFlight = async (req: AuthRequest, res: Response) => {
       return result.count;
     });
 
-    return res.json({
-      message: "Flight itinerary deleted successfully",
-      deletedFlights: deletedCount,
-    });
+    return res.status(204).end();
   } catch (error) {
     console.error("Delete flight error:", error);
 
