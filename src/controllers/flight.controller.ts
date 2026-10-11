@@ -202,7 +202,10 @@ const includeFlightChains = async (
   const loadedIds = new Set(flightsById.keys());
   let pendingIds = flights
     .map(flight => flight.nextFlightId)
-    .filter((id): id is number => id !== null && !loadedIds.has(id));
+    .filter(
+      (id): id is number =>
+        typeof id === "number" && Number.isInteger(id) && !loadedIds.has(id)
+    );
 
   while (pendingIds.length > 0) {
     const nextFlights = await prisma.flight.findMany({
@@ -220,8 +223,13 @@ const includeFlightChains = async (
       loadedIds.add(flight.id);
       flightsById.set(flight.id, flight);
 
-      if (flight.nextFlightId !== null && !loadedIds.has(flight.nextFlightId)) {
-        pendingIds.push(flight.nextFlightId);
+      const nextFlightId = flight.nextFlightId;
+      if (
+        typeof nextFlightId === "number" &&
+        Number.isInteger(nextFlightId) &&
+        !loadedIds.has(nextFlightId)
+      ) {
+        pendingIds.push(nextFlightId);
       }
     }
   }
@@ -233,10 +241,13 @@ const includeFlightChains = async (
     const visited = new Set(visitedIds);
     visited.add(flight.id);
 
+    const nextFlightId = flight.nextFlightId;
     const nextFlight =
-      flight.nextFlightId === null || visited.has(flight.nextFlightId)
+      typeof nextFlightId !== "number" ||
+      !Number.isInteger(nextFlightId) ||
+      visited.has(nextFlightId)
         ? null
-        : flightsById.get(flight.nextFlightId);
+        : flightsById.get(nextFlightId);
 
     return {
       ...flight,
