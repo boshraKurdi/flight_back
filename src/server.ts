@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import express from "express";
 import cors from "cors";
 
@@ -11,7 +13,11 @@ const app = express();
 
 app.use(
   cors({
-    origin: ["http://localhost:8080", "http://localhost:8081"],
+    origin: [
+      "http://localhost:8080",
+      "http://localhost:8081",
+      "https://atyketo.com",
+    ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
