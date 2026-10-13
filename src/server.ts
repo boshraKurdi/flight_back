@@ -21,6 +21,7 @@ app.use(
       "https://atyketo.atyketo.com",
       "https://atyketo.atyketo.flights",
       "https://atyketo.flights",
+      "https://support.atyketo.flights",
       ...(process.env.FRONTEND_ORIGIN ?? "")
         .split(",")
         .map((origin) => origin.trim())
